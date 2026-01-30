@@ -1,0 +1,75 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <world name="default">
+    <include>
+      <uri>model://sun</uri>
+    </include>
+
+    <include>
+      <uri>model://ground_plane</uri>
+    </include>
+    
+    <plugin name="gazebo_ros_state" filename="libgazebo_ros_state.so">
+      <ros>
+        <namespace>/gazebo</namespace>
+      </ros>
+      <update_rate>10.0</update_rate>
+    </plugin>
+
+    <gui fullscreen='0'>
+      <camera name='user_camera'>
+        <pose>-3.0 0.0 4.0 0 0.7 0</pose>
+        <view_controller>orbit</view_controller>
+      </camera>
+    </gui>
+
+    <model name='box_center'>
+      <pose>2.5 0.0 0.25 0 0 0</pose>
+      <static>true</static>
+      <link name='link'>
+        <collision name='collision'>
+          <geometry><box><size>0.5 0.5 0.5</size></box></geometry>
+        </collision>
+        <visual name='visual'>
+          <geometry><box><size>0.5 0.5 0.5</size></box></geometry>
+          <material>
+            <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Red</name></script>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name='box_left'>
+      <pose>2.5 1.5 0.25 0 0 0</pose>
+      <static>true</static>
+      <link name='link'>
+        <collision name='collision'>
+          <geometry><box><size>0.5 0.5 0.5</size></box></geometry>
+        </collision>
+        <visual name='visual'>
+          <geometry><box><size>0.5 0.5 0.5</size></box></geometry>
+          <material>
+            <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name='box_right'>
+      <pose>2.5 -1.5 0.25 0 0 0</pose>
+      <static>true</static>
+      <link name='link'>
+        <collision name='collision'>
+          <geometry><box><size>0.5 0.5 0.5</size></box></geometry>
+        </collision>
+        <visual name='visual'>
+          <geometry><box><size>0.5 0.5 0.5</size></box></geometry>
+          <material>
+            <script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Green</name></script>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>
