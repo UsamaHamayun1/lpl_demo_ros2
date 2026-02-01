@@ -33,6 +33,6 @@ setup(
             'lpl_manager_formula = lpl_demo.lpl_manager_formula:main',
             'human_authorize = lpl_demo.human_authorize:main',
             'lpl_dashboard = lpl_demo.lpl_dashboard:main',
-        ],
+            ],
     },
 )   

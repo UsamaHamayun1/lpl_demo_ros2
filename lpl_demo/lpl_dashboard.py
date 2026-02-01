@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import sys
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
@@ -6,120 +7,190 @@ from geometry_msgs.msg import Twist
 from std_msgs.msg import String, Empty
 import cv2
 import json
-import tkinter as tk
-from tkinter import ttk
-from PIL import Image as PILImage, ImageTk
-import threading
 import numpy as np
+
+from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QLabel, 
+                             QPushButton, QHBoxLayout, QFrame, QProgressBar, QGridLayout)
+from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtGui import QFont, QImage, QPixmap, QKeyEvent
 
 # --- CONFIGURATION ---
 WINDOW_TITLE = "LPL MISSION CONTROL"
-BG_COLOR = "#0f0f0f"
-TEXT_COLOR = "#e0e0e0"
+REFRESH_RATE_MS = 30  # Update GUI every 30ms
 
-class LPLDashboard(Node):
-    def __init__(self, root):
-        super().__init__('lpl_dashboard')
-        self.root = root
-        self.root.title(WINDOW_TITLE)
-        self.root.geometry("1000x800")
-        self.root.configure(bg=BG_COLOR)
-
-        # 1. ROS SUBSCRIBERS
-        self.sub_img = self.create_subscription(Image, '/camera/image_raw', self.image_callback, 10)
-        self.sub_status = self.create_subscription(String, '/lpl/status', self.status_callback, 10)
+class LPLDashboard(QWidget):
+    def __init__(self):
+        super().__init__()
         
-        # 2. ROS PUBLISHERS
-        self.pub_auth = self.create_publisher(Empty, '/lpl/authorize', 10)
-        self.pub_input = self.create_publisher(Twist, 'cmd_vel_input', 10)
+        # 1. ROS SETUP
+        rclpy.init(args=None)
+        self.node = Node('lpl_mission_control_qt')
+        
+        # Subscribers
+        self.sub_status = self.node.create_subscription(String, '/lpl/status', self.status_callback, 10)
+        self.sub_cam = self.node.create_subscription(Image, '/camera/image_raw', self.image_callback, 10)
+        
+        # Publishers
+        self.pub_auth = self.node.create_publisher(Empty, '/lpl/authorize', 10)
+        self.pub_input = self.node.create_publisher(Twist, '/cmd_vel_input', 10)
 
-        # 3. STATE VARIABLES
-        self.var_state = tk.StringVar(value="WAITING...")
-        self.var_obj = tk.StringVar(value="--")
-        self.var_conf = tk.StringVar(value="1.00")
+        # State Variables
         self.manual_mode = False
-        
-        # 4. JOYSTICK VARIABLES
         self.target_lin = 0.0
         self.target_ang = 0.0
 
-        # 5. BUILD UI
-        self.setup_ui()
+        # 2. UI SETUP
+        self.init_ui()
+
+        # 3. TIMERS
+        self.timer_ros = QTimer(self)
+        self.timer_ros.timeout.connect(self.spin_ros)
+        self.timer_ros.start(REFRESH_RATE_MS)
+
+        self.timer_drive = QTimer(self)
+        self.timer_drive.timeout.connect(self.publish_drive)
+        self.timer_drive.start(100) # 10Hz Control Loop
+
+    def init_ui(self):
+        self.setWindowTitle(WINDOW_TITLE)
+        self.setGeometry(100, 100, 900, 900)
+        self.setStyleSheet("background-color: #121212; color: #e0e0e0;")
+
+        # Main Layout
+        layout = QVBoxLayout()
+        layout.setSpacing(15)
+        layout.setContentsMargins(30, 30, 30, 30)
+
+        # --- HEADER ---
+        header = QLabel("ROBOT OPTICAL FEED")
+        header.setAlignment(Qt.AlignCenter)
+        header.setFont(QFont("Arial", 10, QFont.Bold))
+        header.setStyleSheet("color: #888;")
+        layout.addWidget(header)
+
+        # --- VIDEO FEED ---
+        self.lbl_video = QLabel("NO SIGNAL\n(Check Gazebo)")
+        self.lbl_video.setAlignment(Qt.AlignCenter)
+        self.lbl_video.setStyleSheet("background-color: black; border: 2px solid #333; border-radius: 5px;")
+        self.lbl_video.setMinimumSize(800, 450)
+        self.lbl_video.setSizePolicy(self.lbl_video.sizePolicy().Expanding, self.lbl_video.sizePolicy().Expanding)
+        layout.addWidget(self.lbl_video)
+
+        # --- STATUS & TELEMETRY PANEL ---
+        status_frame = QFrame()
+        status_frame.setStyleSheet("background-color: #1e1e1e; border-radius: 10px; padding: 15px;")
         
-        # 6. START CONTROL LOOP (10Hz)
-        self.create_timer(0.1, self.publish_control)
+        # Use Grid Layout for structured data
+        grid_layout = QGridLayout(status_frame)
 
-    def setup_ui(self):
-        style = ttk.Style()
-        style.theme_use('clam')
+        # -- Row 1: Main Status --
+        self.lbl_obj_title = QLabel("TARGET: --")
+        self.lbl_obj_title.setFont(QFont("Courier New", 14, QFont.Bold))
+        grid_layout.addWidget(self.lbl_obj_title, 0, 0)
 
-        # --- CAMERA FEED ---
-        self.cam_label = tk.Label(self.root, text="[ WAITING FOR VIDEO ]", bg="black", fg="#333", width=100, height=25)
-        self.cam_label.pack(pady=10, fill="both", expand=True)
+        self.lbl_state = QLabel("WAITING")
+        self.lbl_state.setAlignment(Qt.AlignCenter)
+        self.lbl_state.setFont(QFont("Arial", 22, QFont.Bold))
+        self.lbl_state.setStyleSheet("color: gray;")
+        grid_layout.addWidget(self.lbl_state, 0, 1)
 
-        # --- DATA PANEL ---
-        data_frame = tk.Frame(self.root, bg=BG_COLOR)
-        data_frame.pack(fill="x", padx=20, pady=5)
+        self.lbl_conf_val = QLabel("CONF: 1.00")
+        self.lbl_conf_val.setAlignment(Qt.AlignRight)
+        self.lbl_conf_val.setFont(QFont("Courier New", 14, QFont.Bold))
+        grid_layout.addWidget(self.lbl_conf_val, 0, 2)
 
-        # Left: Target
-        tk.Label(data_frame, text="TARGET OBSTACLE", font=("Arial", 8), bg=BG_COLOR, fg="#666").grid(row=0, column=0, sticky="w")
-        tk.Label(data_frame, textvariable=self.var_obj, font=("Courier", 18, "bold"), bg=BG_COLOR, fg="white").grid(row=1, column=0, sticky="w")
+        # -- Row 2: Progress Bar --
+        self.bar_conf = QProgressBar()
+        self.bar_conf.setRange(0, 100)
+        self.bar_conf.setValue(100)
+        self.bar_conf.setTextVisible(False)
+        self.bar_conf.setFixedHeight(10)
+        self.bar_conf.setStyleSheet("QProgressBar::chunk { background-color: #28a745; }")
+        grid_layout.addWidget(self.bar_conf, 1, 0, 1, 3) # Span 3 columns
 
-        # Center: State
-        self.lbl_state = tk.Label(data_frame, textvariable=self.var_state, font=("Arial", 24, "bold"), bg=BG_COLOR, fg="#555")
-        self.lbl_state.place(relx=0.5, rely=0.5, anchor="center")
+        # -- Row 3: Velocity Telemetry (NEW) --
+        vel_label = QLabel("VELOCITY:")
+        vel_label.setFont(QFont("Arial", 10, QFont.Bold))
+        vel_label.setStyleSheet("color: #888; margin-top: 10px;")
+        grid_layout.addWidget(vel_label, 2, 0)
 
-        # Right: Scalar Confidence
-        tk.Label(data_frame, text="CONFIDENCE", font=("Arial", 8), bg=BG_COLOR, fg="#666").place(relx=1.0, y=0, anchor="ne")
-        self.lbl_conf = tk.Label(data_frame, textvariable=self.var_conf, font=("Consolas", 36, "bold"), bg=BG_COLOR, fg="#00ff00")
-        self.lbl_conf.place(relx=1.0, y=20, anchor="ne")
+        self.lbl_vel_lin = QLabel("LINEAR: 0.00 m/s")
+        self.lbl_vel_lin.setFont(QFont("Courier New", 12))
+        self.lbl_vel_lin.setStyleSheet("color: #00ccff; margin-top: 10px;")
+        grid_layout.addWidget(self.lbl_vel_lin, 2, 1)
 
-        # --- BAR GRAPH ---
-        self.canvas = tk.Canvas(self.root, height=20, bg="#222", highlightthickness=0)
-        self.canvas.pack(fill="x", padx=20, pady=10)
-        self.bar = self.canvas.create_rectangle(0, 0, 0, 20, fill="#00ff00", width=0)
+        self.lbl_vel_ang = QLabel("ANGULAR: 0.00 rad/s")
+        self.lbl_vel_ang.setFont(QFont("Courier New", 12))
+        self.lbl_vel_ang.setStyleSheet("color: #ffcc00; margin-top: 10px;")
+        grid_layout.addWidget(self.lbl_vel_ang, 2, 2, Qt.AlignRight)
+
+        layout.addWidget(status_frame)
 
         # --- CONTROLS ---
-        ctrl_frame = tk.Frame(self.root, bg="#1a1a1a", pady=10)
-        ctrl_frame.pack(fill="x", padx=20, pady=10)
-
-        # D-Pad
-        pad = tk.Frame(ctrl_frame, bg="#1a1a1a")
-        pad.pack(side="left", padx=20)
-        btn_opts = {"font":("Arial", 10, "bold"), "bg":"#333", "fg":"white", "width":4, "height":1}
+        btn_layout = QHBoxLayout()
         
-        tk.Button(pad, text="▲", command=lambda: self.move(0.2, 0.0), **btn_opts).grid(row=0, column=1)
-        tk.Button(pad, text="◄", command=lambda: self.move(0.0, 0.5), **btn_opts).grid(row=1, column=0)
-        tk.Button(pad, text="■", command=lambda: self.move(0.0, 0.0), bg="#c00", fg="white", width=4).grid(row=1, column=1)
-        tk.Button(pad, text="►", command=lambda: self.move(0.0, -0.5), **btn_opts).grid(row=1, column=2)
-        tk.Button(pad, text="▼", command=lambda: self.move(-0.2, 0.0), **btn_opts).grid(row=2, column=1)
+        lbl_instruct = QLabel("CONTROLS:\nWASD to Drive\nSPACE to Override")
+        lbl_instruct.setFont(QFont("Arial", 10))
+        lbl_instruct.setStyleSheet("color: #666;")
+        btn_layout.addWidget(lbl_instruct)
+        
+        btn_layout.addStretch()
 
-        # Authorize Button
-        self.btn_auth = tk.Button(ctrl_frame, text="TAKE CONTROL [SPACE]", command=self.authorize, 
-                                  font=("Arial", 16, "bold"), bg="#333", fg="#555", state="disabled", height=2)
-        self.btn_auth.pack(side="right", fill="both", expand=True, padx=(30, 0))
+        self.btn_stop = QPushButton("EMERGENCY STOP")
+        self.btn_stop.setFixedSize(200, 60)
+        self.btn_stop.setFont(QFont("Arial", 12, QFont.Bold))
+        self.btn_stop.setStyleSheet("background-color: #d32f2f; color: white; border-radius: 5px;")
+        self.btn_stop.clicked.connect(lambda: self.set_speed(0.0, 0.0))
+        btn_layout.addWidget(self.btn_stop)
 
-        # Keybinds
-        self.root.bind('<space>', lambda e: self.authorize())
-        self.root.bind('<w>', lambda e: self.move(0.2, 0.0))
-        self.root.bind('<s>', lambda e: self.move(0.0, 0.0))
-        self.root.bind('<a>', lambda e: self.move(0.0, 0.5))
-        self.root.bind('<d>', lambda e: self.move(0.0, -0.5))
+        self.btn_auth = QPushButton("TAKE CONTROL\n[SPACE]")
+        self.btn_auth.setFixedSize(250, 60)
+        self.btn_auth.setFont(QFont("Arial", 14, QFont.Bold))
+        self.btn_auth.setStyleSheet("background-color: #444; color: #888; border-radius: 5px;")
+        self.btn_auth.setEnabled(False)
+        self.btn_auth.clicked.connect(self.send_auth)
+        btn_layout.addWidget(self.btn_auth)
 
-    def move(self, x, z):
-        self.target_lin = x
-        self.target_ang = z
+        layout.addLayout(btn_layout)
 
-    def publish_control(self):
+        self.setLayout(layout)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    # --- LOGIC ---
+
+    def spin_ros(self):
+        rclpy.spin_once(self.node, timeout_sec=0)
+
+    def publish_drive(self):
         msg = Twist()
         msg.linear.x = float(self.target_lin)
         msg.angular.z = float(self.target_ang)
         self.pub_input.publish(msg)
+        
+        # UPDATE VELOCITY GUI
+        self.lbl_vel_lin.setText(f"LINEAR: {self.target_lin:.2f} m/s")
+        self.lbl_vel_ang.setText(f"ANGULAR: {self.target_ang:.2f} rad/s")
 
-    def authorize(self):
-        # We allow authorization if paused OR if we are already in manual mode (to toggle back)
-        if self.btn_auth['state'] == 'normal' or self.manual_mode:
+    def send_auth(self):
+        if self.btn_auth.isEnabled() or self.manual_mode:
             self.pub_auth.publish(Empty())
+
+    def set_speed(self, x, z):
+        self.target_lin = x
+        self.target_ang = z
+
+    # --- EVENTS ---
+
+    def keyPressEvent(self, event: QKeyEvent):
+        key = event.key()
+        if key == Qt.Key_W: self.set_speed(0.2, 0.0)
+        elif key == Qt.Key_S: self.set_speed(0.0, 0.0)
+        elif key == Qt.Key_A: self.set_speed(0.0, 0.5)
+        elif key == Qt.Key_D: self.set_speed(0.0, -0.5)
+        elif key == Qt.Key_X: self.set_speed(-0.2, 0.0)
+        elif key == Qt.Key_Space: self.send_auth()
+
+    # --- CALLBACKS ---
 
     def status_callback(self, msg):
         try:
@@ -129,64 +200,67 @@ class LPLDashboard(Node):
             obj = data.get('object', "--")
             self.manual_mode = data.get('override', False)
 
-            # Update Variables
-            self.var_obj.set(obj.upper())
-            self.var_state.set(state)
-            self.var_conf.set(f"{conf:.2f}")
+            self.lbl_obj_title.setText(f"TARGET: {obj.upper()}")
+            self.lbl_state.setText(state)
+            self.lbl_conf_val.setText(f"CONF: {conf:.2f}")
+            self.bar_conf.setValue(int(conf * 100))
 
-            # Update Bar Width
-            w = self.canvas.winfo_width()
-            self.canvas.coords(self.bar, 0, 0, w * conf, 20)
-
-            # --- COLOR LOGIC ---
+            # Color Logic
             if self.manual_mode:
-                c = "#00ccff" # Cyan (Manual)
-                self.btn_auth.config(state="normal", bg=c, fg="black", text="RESUME AUTO [SPACE]")
-            elif state == "PAUSE":
-                c = "#ff3333" # Red (Danger)
-                self.btn_auth.config(state="normal", bg="white", fg="black", text="TAKE CONTROL [SPACE]")
+                c = "#00ccff" # Cyan
+                self.lbl_state.setStyleSheet(f"color: {c}; font-weight: bold;")
+                self.bar_conf.setStyleSheet(f"QProgressBar::chunk {{ background-color: {c}; }}")
+                self.btn_auth.setStyleSheet(f"background-color: {c}; color: black; border-radius: 5px;")
+                self.btn_auth.setText("RESUME AUTO\n[SPACE]")
+                self.btn_auth.setEnabled(True)
+            elif state == "UNSTABLE":
+                c = "#ff3333" # Red
+                self.lbl_state.setStyleSheet(f"color: {c}; font-weight: bold;")
+                self.bar_conf.setStyleSheet(f"QProgressBar::chunk {{ background-color: {c}; }}")
+                self.btn_auth.setStyleSheet("background-color: white; color: black; border-radius: 5px;")
+                self.btn_auth.setText("TAKE CONTROL\n[SPACE]")
+                self.btn_auth.setEnabled(True)
             elif state == "PROCEED":
-                c = "#00ff00" # Green
-                self.btn_auth.config(state="disabled", bg="#222", fg="#555", text="AUTO ENGAGED")
-            else:
-                c = "#ffaa00" # Yellow
-                self.btn_auth.config(state="disabled", bg="#222", fg="#555", text="CAUTION")
+                c = "#28a745" # Green
+                self.lbl_state.setStyleSheet(f"color: {c}; font-weight: bold;")
+                self.bar_conf.setStyleSheet(f"QProgressBar::chunk {{ background-color: {c}; }}")
+                self.btn_auth.setStyleSheet("background-color: #444; color: #888; border-radius: 5px;")
+                self.btn_auth.setText("AUTO ENGAGED")
+                self.btn_auth.setEnabled(False)
+            else: # AVOIDING (Yellow)
+                c = "#ffc107" # Yellow
+                self.lbl_state.setStyleSheet(f"color: {c}; font-weight: bold;")
+                self.bar_conf.setStyleSheet(f"QProgressBar::chunk {{ background-color: {c}; }}")
+                self.btn_auth.setStyleSheet("background-color: #444; color: #888; border-radius: 5px;")
+                self.btn_auth.setText("CAUTION")
+                self.btn_auth.setEnabled(False)
 
-            self.lbl_state.config(fg=c)
-            self.lbl_conf.config(fg=c)
-            self.canvas.itemconfig(self.bar, fill=c)
-
-        except Exception as e:
-            print(f"Status Error: {e}")
-
-    def image_callback(self, msg):
-        try:
-            # MANUAL NUMPY DECODING (NO CV_BRIDGE)
-            np_arr = np.frombuffer(msg.data, dtype=np.uint8)
-            cv_img = np_arr.reshape(msg.height, msg.width, -1)
-            
-            # RGB vs BGR check
-            if 'rgb' in msg.encoding:
-                cv_img = cv2.cvtColor(cv_img, cv2.COLOR_RGB2BGR)
-            
-            # Resize
-            cv_img = cv2.resize(cv_img, (800, 450))
-            
-            # Convert to TK
-            img = ImageTk.PhotoImage(PILImage.fromarray(cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)))
-            self.cam_label.configure(image=img)
-            self.cam_label.image = img
         except Exception:
             pass
 
+    def image_callback(self, msg):
+        try:
+            np_arr = np.frombuffer(msg.data, dtype=np.uint8)
+            cv_img = np_arr.reshape(msg.height, msg.width, -1)
+            if 'rgb' in msg.encoding: cv_img = cv2.cvtColor(cv_img, cv2.COLOR_RGB2BGR)
+            cv_img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
+            h, w, ch = cv_img.shape
+            bytes_per_line = ch * w
+            qt_img = QImage(cv_img.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            scaled_pixmap = QPixmap.fromImage(qt_img).scaled(
+                self.lbl_video.width(), self.lbl_video.height(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.lbl_video.setPixmap(scaled_pixmap)
+        except Exception: pass
+
+    def closeEvent(self, event):
+        rclpy.shutdown()
+        event.accept()
+
 def main():
-    rclpy.init()
-    root = tk.Tk()
-    app = LPLDashboard(root)
-    t = threading.Thread(target=lambda: rclpy.spin(app), daemon=True)
-    t.start()
-    root.mainloop()
-    rclpy.shutdown()
+    app = QApplication(sys.argv)
+    window = LPLDashboard()
+    window.show()
+    sys.exit(app.exec_())
 
 if __name__ == '__main__':
     main()

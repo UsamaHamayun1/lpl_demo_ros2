@@ -6,135 +6,107 @@ from geometry_msgs.msg import Twist
 from std_msgs.msg import Empty, String
 import math
 import json
-import statistics 
 
-class LPLManagerFormula(Node):
+class LPLManagerSimple(Node):
     def __init__(self):
         super().__init__('lpl_manager_formula')
         
         self.confidence = 1.0
-        self.manual_override = False # <--- NEW FLAG
+        self.manual_override = False
         self.target_object = "None"
         
-        self.vel_history = [] 
-        self.history_size = 10 
-        
         self.sub_models = self.create_subscription(ModelStates, '/gazebo/model_states', self.perception_callback, 10)
-        self.sub_input = self.create_subscription(Twist, 'cmd_vel_input', self.control_callback, 10)
+        self.sub_input = self.create_subscription(Twist, '/cmd_vel_input', self.control_callback, 10)
         self.sub_auth = self.create_subscription(Empty, '/lpl/authorize', self.authorize_callback, 10)
-        self.pub_cmd = self.create_publisher(Twist, 'cmd_vel', 10)
+        
+        self.pub_cmd = self.create_publisher(Twist, '/cmd_vel', 10)
         self.pub_status = self.create_publisher(String, '/lpl/status', 10)
 
-    def authorize_callback(self, msg):
-        # TOGGLE LOGIC:
-        # If we are in Auto, switch to Manual.
-        # If we are in Manual, switch to Auto.
-        self.manual_override = not self.manual_override
-        
-        if self.manual_override:
-            self.get_logger().info("MANUAL OVERRIDE: ENGAGED")
-        else:
-            self.get_logger().info("MANUAL OVERRIDE: DISENGAGED (Resuming Auto)")
+        print("--- LPL MANAGER: SINGLE ACTOR DEMO LOADED ---")
 
-    def calculate_stability_score(self, new_velocity):
-        self.vel_history.append(new_velocity)
-        if len(self.vel_history) > self.history_size: self.vel_history.pop(0)
-        if len(self.vel_history) < 2: return 1.0
-        try: variance = statistics.variance(self.vel_history)
-        except: return 1.0
-        
-        jitter_threshold = 0.1
-        if variance >= jitter_threshold: return 0.0
-        else: return 1.0 - (variance / jitter_threshold)
+    def authorize_callback(self, msg):
+        self.manual_override = not self.manual_override
 
     def perception_callback(self, msg):
         try:
-            # 1. Find Robot & Object
+            # 1. FIND ROBOT
             robot_idx = -1
-            possible_names = ['waffle_pi', 'turtlebot3_waffle_pi', 'turtlebot3_burger', 'mobile_base']
-            for name in possible_names:
-                if name in msg.name:
-                    robot_idx = msg.name.index(name)
-                    break
-            if robot_idx == -1: return 
-            robot_pos = msg.pose[robot_idx].position
+            if 'turtlebot3_waffle_pi' in msg.name: robot_idx = msg.name.index('turtlebot3_waffle_pi')
+            elif 'waffle_pi' in msg.name: robot_idx = msg.name.index('waffle_pi')
+            if robot_idx == -1: return
+
+            rx = msg.pose[robot_idx].position.x
+            ry = msg.pose[robot_idx].position.y
 
             closest_dist = 999.0
             closest_name = "None"
-            closest_vel_mag = 0.0
             
+            # 2. FIND ACTOR
             for i, name in enumerate(msg.name):
-                if name in possible_names or 'ground' in name or 'sun' in name: continue
-                p = msg.pose[i].position
-                dist = math.sqrt((robot_pos.x - p.x)**2 + (robot_pos.y - p.y)**2)
-                if dist < closest_dist: 
+                if i == robot_idx: continue
+                if any(x in name for x in ['ground', 'sun']): continue
+                
+                ox = msg.pose[i].position.x
+                oy = msg.pose[i].position.y
+                dist = math.sqrt((rx - ox)**2 + (ry - oy)**2)
+                
+                if dist < closest_dist:
                     closest_dist = dist
                     closest_name = name
-                    v = msg.twist[i].linear
-                    closest_vel_mag = math.sqrt(v.x**2 + v.y**2 + v.z**2)
 
             self.target_object = closest_name
 
-            # 2. Calculate Formula (ALWAYS RUNNING)
-            safe_dist = 2.0
-            crit_dist = 0.9 
-            if closest_dist >= safe_dist: prox_score = 1.0
-            elif closest_dist <= crit_dist: prox_score = 0.0
-            else: prox_score = (closest_dist - crit_dist) / (safe_dist - crit_dist)
+            # 3. CALCULATE CONFIDENCE (Distance Based)
+            # Far (> 3.0m) = 1.0
+            # Close (< 1.0m) = 0.0 (STOP)
+            if closest_dist > 3.0:
+                self.confidence = 1.0
+            elif closest_dist < 1.0:
+                self.confidence = 0.0
+            else:
+                # Linear drop between 3.0 and 1.0
+                self.confidence = (closest_dist - 1.0) / 2.0
 
-            stab_score = self.calculate_stability_score(closest_vel_mag)
-            
-            # RAW CONFIDENCE
-            self.confidence = prox_score * stab_score
-            if self.confidence < 0.05: self.confidence = 0.0
+            # 4. DETERMINE STATE LABEL
+            if self.manual_override:
+                state_label = "MANUAL"
+            elif self.confidence == 0.0:
+                state_label = "UNSTABLE" # Acts as PAUSE
+            elif self.confidence < 0.8:
+                state_label = "AVOIDING"
+            else:
+                state_label = "PROCEED"
 
-            # 3. Publish Status
-            self.publish_status_to_ui(closest_name)
+            status_packet = {
+                "confidence": round(self.confidence, 2),
+                "state": state_label,
+                "object": closest_name,
+                "override": self.manual_override
+            }
+            self.pub_status.publish(String(data=json.dumps(status_packet)))
 
         except Exception:
             pass
 
     def control_callback(self, msg):
-        safe_msg = Twist()
-        safe_msg.angular.z = msg.angular.z 
-        velocity_request = msg.linear.x
-
+        final_cmd = Twist()
+        final_cmd.angular.z = msg.angular.z 
+        
         if self.manual_override:
-            # MODE A: HUMAN CONTROL (Ignore Confidence)
-            # Pass exactly what the human pressed on joystick
-            safe_msg.linear.x = velocity_request
-            safe_msg.angular.z = msg.angular.z 
+            final_cmd.linear.x = msg.linear.x
         else:
-            # MODE B: AUTO/LPL CONTROL (Respect Confidence)
-            if velocity_request < 0.0:
-                safe_msg.linear.x = velocity_request # Reverse always allowed
+            if msg.linear.x > 0:
+                final_cmd.linear.x = msg.linear.x * self.confidence
             else:
-                # Multiply speed by confidence
-                safe_msg.linear.x = velocity_request * self.confidence
+                final_cmd.linear.x = msg.linear.x 
 
-        self.pub_cmd.publish(safe_msg)
-
-    def publish_status_to_ui(self, obs_name):
-        # Determine State Label for UI
-        if self.manual_override:
-            state = "MANUAL"
-        elif self.confidence >= 0.8:
-            state = "PROCEED"
-        elif self.confidence == 0.0:
-            state = "PAUSE"
-        else:
-            state = "CAUTION"
-
-        status_packet = {
-            "confidence": self.confidence,
-            "state": state,
-            "object": obs_name,
-            "override": self.manual_override
-        }
-        self.pub_status.publish(String(data=json.dumps(status_packet)))
+        self.pub_cmd.publish(final_cmd)
 
 def main(args=None):
     rclpy.init(args=args)
-    node = LPLManagerFormula()
+    node = LPLManagerSimple()
     rclpy.spin(node)
     rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
