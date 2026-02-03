@@ -38,6 +38,7 @@ class LPLDashboard(QWidget):
         self.manual_mode = False
         self.target_lin = 0.0
         self.target_ang = 0.0
+        self.last_key_press_time = 0
 
         # 2. UI SETUP
         self.init_ui()
@@ -53,7 +54,7 @@ class LPLDashboard(QWidget):
 
     def init_ui(self):
         self.setWindowTitle(WINDOW_TITLE)
-        self.setGeometry(100, 100, 900, 900)
+        self.setGeometry(100, 100, 900, 700)
         self.setStyleSheet("background-color: #121212; color: #e0e0e0;")
 
         # Main Layout
@@ -72,7 +73,7 @@ class LPLDashboard(QWidget):
         self.lbl_video = QLabel("NO SIGNAL\n(Check Gazebo)")
         self.lbl_video.setAlignment(Qt.AlignCenter)
         self.lbl_video.setStyleSheet("background-color: black; border: 2px solid #333; border-radius: 5px;")
-        self.lbl_video.setMinimumSize(800, 450)
+        self.lbl_video.setMinimumSize(800, 400)
         self.lbl_video.setSizePolicy(self.lbl_video.sizePolicy().Expanding, self.lbl_video.sizePolicy().Expanding)
         layout.addWidget(self.lbl_video)
 
@@ -80,7 +81,6 @@ class LPLDashboard(QWidget):
         status_frame = QFrame()
         status_frame.setStyleSheet("background-color: #1e1e1e; border-radius: 10px; padding: 15px;")
         
-        # Use Grid Layout for structured data
         grid_layout = QGridLayout(status_frame)
 
         # -- Row 1: Main Status --
@@ -106,9 +106,9 @@ class LPLDashboard(QWidget):
         self.bar_conf.setTextVisible(False)
         self.bar_conf.setFixedHeight(10)
         self.bar_conf.setStyleSheet("QProgressBar::chunk { background-color: #28a745; }")
-        grid_layout.addWidget(self.bar_conf, 1, 0, 1, 3) # Span 3 columns
+        grid_layout.addWidget(self.bar_conf, 1, 0, 1, 3) 
 
-        # -- Row 3: Velocity Telemetry (NEW) --
+        # -- Row 3: Velocity Telemetry --
         vel_label = QLabel("VELOCITY:")
         vel_label.setFont(QFont("Arial", 10, QFont.Bold))
         vel_label.setStyleSheet("color: #888; margin-top: 10px;")
@@ -167,11 +167,12 @@ class LPLDashboard(QWidget):
         msg.angular.z = float(self.target_ang)
         self.pub_input.publish(msg)
         
-        # UPDATE VELOCITY GUI
+        # Update UI Telemetry
         self.lbl_vel_lin.setText(f"LINEAR: {self.target_lin:.2f} m/s")
         self.lbl_vel_ang.setText(f"ANGULAR: {self.target_ang:.2f} rad/s")
 
     def send_auth(self):
+        # Allow sending auth if button is enabled OR if we are already in manual mode
         if self.btn_auth.isEnabled() or self.manual_mode:
             self.pub_auth.publish(Empty())
 
@@ -183,12 +184,13 @@ class LPLDashboard(QWidget):
 
     def keyPressEvent(self, event: QKeyEvent):
         key = event.key()
-        if key == Qt.Key_W: self.set_speed(0.2, 0.0)
-        elif key == Qt.Key_S: self.set_speed(0.0, 0.0)
-        elif key == Qt.Key_A: self.set_speed(0.0, 0.5)
-        elif key == Qt.Key_D: self.set_speed(0.0, -0.5)
-        elif key == Qt.Key_X: self.set_speed(-0.2, 0.0)
-        elif key == Qt.Key_Space: self.send_auth()
+        
+        if key == Qt.Key_W: self.set_speed(0.3, 0.0)   # Drive Forward
+        elif key == Qt.Key_S: self.set_speed(0.0, 0.0) # Stop
+        elif key == Qt.Key_A: self.set_speed(0.0, 0.5) # Turn Left
+        elif key == Qt.Key_D: self.set_speed(0.0, -0.5)# Turn Right
+        elif key == Qt.Key_X: self.set_speed(-0.2, 0.0)# Reverse
+        elif key == Qt.Key_Space: self.send_auth()     # Authorize/Override
 
     # --- CALLBACKS ---
 
@@ -205,32 +207,45 @@ class LPLDashboard(QWidget):
             self.lbl_conf_val.setText(f"CONF: {conf:.2f}")
             self.bar_conf.setValue(int(conf * 100))
 
-            # Color Logic
+            # --- DYNAMIC STYLING ---
+            
+            # 1. MANUAL OVERRIDE (Cyan)
             if self.manual_mode:
-                c = "#00ccff" # Cyan
+                c = "#00ccff" 
                 self.lbl_state.setStyleSheet(f"color: {c}; font-weight: bold;")
                 self.bar_conf.setStyleSheet(f"QProgressBar::chunk {{ background-color: {c}; }}")
+                
                 self.btn_auth.setStyleSheet(f"background-color: {c}; color: black; border-radius: 5px;")
                 self.btn_auth.setText("RESUME AUTO\n[SPACE]")
                 self.btn_auth.setEnabled(True)
-            elif state == "UNSTABLE":
-                c = "#ff3333" # Red
+
+            # 2. DANGER STOP / UNSTABLE (Red)
+            # *Fixed Check*: Matches 'DANGER STOP' from your manager
+            elif state == "DANGER STOP" or state == "UNSTABLE":
+                c = "#ff3333" 
                 self.lbl_state.setStyleSheet(f"color: {c}; font-weight: bold;")
                 self.bar_conf.setStyleSheet(f"QProgressBar::chunk {{ background-color: {c}; }}")
+                
                 self.btn_auth.setStyleSheet("background-color: white; color: black; border-radius: 5px;")
                 self.btn_auth.setText("TAKE CONTROL\n[SPACE]")
-                self.btn_auth.setEnabled(True)
+                self.btn_auth.setEnabled(True) # Button lights up!
+
+            # 3. PROCEED (Green)
             elif state == "PROCEED":
-                c = "#28a745" # Green
+                c = "#28a745" 
                 self.lbl_state.setStyleSheet(f"color: {c}; font-weight: bold;")
                 self.bar_conf.setStyleSheet(f"QProgressBar::chunk {{ background-color: {c}; }}")
+                
                 self.btn_auth.setStyleSheet("background-color: #444; color: #888; border-radius: 5px;")
                 self.btn_auth.setText("AUTO ENGAGED")
                 self.btn_auth.setEnabled(False)
-            else: # AVOIDING (Yellow)
-                c = "#ffc107" # Yellow
+
+            # 4. AVOIDING / CAUTION (Yellow)
+            else: 
+                c = "#ffc107"
                 self.lbl_state.setStyleSheet(f"color: {c}; font-weight: bold;")
                 self.bar_conf.setStyleSheet(f"QProgressBar::chunk {{ background-color: {c}; }}")
+                
                 self.btn_auth.setStyleSheet("background-color: #444; color: #888; border-radius: 5px;")
                 self.btn_auth.setText("CAUTION")
                 self.btn_auth.setEnabled(False)
@@ -240,13 +255,19 @@ class LPLDashboard(QWidget):
 
     def image_callback(self, msg):
         try:
+            # Convert ROS Image to OpenCV
             np_arr = np.frombuffer(msg.data, dtype=np.uint8)
             cv_img = np_arr.reshape(msg.height, msg.width, -1)
+            
+            # Convert RGB/BGR for Qt
             if 'rgb' in msg.encoding: cv_img = cv2.cvtColor(cv_img, cv2.COLOR_RGB2BGR)
             cv_img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
+            
             h, w, ch = cv_img.shape
             bytes_per_line = ch * w
             qt_img = QImage(cv_img.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            
+            # Scale to fit label
             scaled_pixmap = QPixmap.fromImage(qt_img).scaled(
                 self.lbl_video.width(), self.lbl_video.height(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.lbl_video.setPixmap(scaled_pixmap)

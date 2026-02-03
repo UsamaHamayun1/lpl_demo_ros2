@@ -6,15 +6,41 @@ from geometry_msgs.msg import Twist
 from std_msgs.msg import Empty, String
 import math
 import json
+import statistics
+import time
+from collections import deque 
 
-class LPLManagerSimple(Node):
+# --- AVOIDANCE STATES ---
+STATE_CRUISE = 0
+STATE_SWERVE_OUT = 1
+STATE_PASSING = 2
+STATE_MERGE_BACK = 3
+
+class LPLManagerFormula(Node):
     def __init__(self):
         super().__init__('lpl_manager_formula')
         
-        self.confidence = 1.0
-        self.manual_override = False
-        self.target_object = "None"
+        # --- CONFIGURATION ---
+        self.LPL_ENABLED = True 
         
+        # --- STATE VARIABLES ---
+        self.confidence = 1.0
+        self.smooth_conf = 1.0
+        self.last_raw_conf = 1.0 
+        
+        # Avoidance State Machine
+        self.drive_state = STATE_CRUISE
+        self.state_start_time = 0
+        self.closest_dist = 99.0 
+        
+        # Stability Buffer
+        self.vel_history = deque(maxlen=10) 
+        
+        # Recovery
+        self.recovery_mode = False
+        self.recovery_value = 0.0
+        
+        # --- COMMUNICATION ---
         self.sub_models = self.create_subscription(ModelStates, '/gazebo/model_states', self.perception_callback, 10)
         self.sub_input = self.create_subscription(Twist, '/cmd_vel_input', self.control_callback, 10)
         self.sub_auth = self.create_subscription(Empty, '/lpl/authorize', self.authorize_callback, 10)
@@ -22,89 +48,162 @@ class LPLManagerSimple(Node):
         self.pub_cmd = self.create_publisher(Twist, '/cmd_vel', 10)
         self.pub_status = self.create_publisher(String, '/lpl/status', 10)
 
-        print("--- LPL MANAGER: SINGLE ACTOR DEMO LOADED ---")
+        self.get_logger().info("--- LPL MANAGER: TUNED FOR STATIC BOX ---")
 
     def authorize_callback(self, msg):
-        self.manual_override = not self.manual_override
+        if self.confidence < 0.3:
+            self.recovery_mode = True
+            self.recovery_value = self.confidence 
+
+    def calculate_stability_score(self, new_velocity):
+        self.vel_history.append(new_velocity)
+        if len(self.vel_history) < 2: return 1.0
+        
+        try: variance = statistics.variance(self.vel_history)
+        except: return 1.0
+        
+        jitter_threshold = 0.15 
+        if variance >= jitter_threshold: return 0.0
+        else: return 1.0 - (variance / jitter_threshold)
 
     def perception_callback(self, msg):
         try:
             # 1. FIND ROBOT
             robot_idx = -1
-            if 'turtlebot3_waffle_pi' in msg.name: robot_idx = msg.name.index('turtlebot3_waffle_pi')
-            elif 'waffle_pi' in msg.name: robot_idx = msg.name.index('waffle_pi')
-            if robot_idx == -1: return
-
-            rx = msg.pose[robot_idx].position.x
-            ry = msg.pose[robot_idx].position.y
-
-            closest_dist = 999.0
-            closest_name = "None"
+            possible_names = ['waffle_pi', 'turtlebot3_waffle_pi', 'mobile_base']
+            for name in possible_names:
+                if name in msg.name:
+                    robot_idx = msg.name.index(name)
+                    break
+            if robot_idx == -1: return 
             
-            # 2. FIND ACTOR
+            robot_pos = msg.pose[robot_idx].position
+            rx, ry = robot_pos.x, robot_pos.y
+
+            # 2. FIND CLOSEST OBSTACLE
+            self.closest_dist = 999.0
+            closest_name = "None"
+            closest_vel_mag = 0.0
+            
             for i, name in enumerate(msg.name):
                 if i == robot_idx: continue
-                if any(x in name for x in ['ground', 'sun']): continue
+                if any(x in name for x in ['ground', 'sun', 'floor']): continue
                 
                 ox = msg.pose[i].position.x
                 oy = msg.pose[i].position.y
                 dist = math.sqrt((rx - ox)**2 + (ry - oy)**2)
                 
-                if dist < closest_dist:
-                    closest_dist = dist
+                if dist < self.closest_dist: 
+                    self.closest_dist = dist
                     closest_name = name
+                    v = msg.twist[i].linear
+                    closest_vel_mag = math.sqrt(v.x**2 + v.y**2 + v.z**2)
 
-            self.target_object = closest_name
+            # 3. CALCULATE CONFIDENCE
+            if self.LPL_ENABLED:
+                # --- TUNED VALUES ---
+                # We lower crit_dist to 0.3 so the score stays high even when close.
+                safe_dist = 2.0 
+                crit_dist = 0.5 
+                
+                if self.closest_dist >= safe_dist: prox_score = 1.0
+                elif self.closest_dist <= crit_dist: prox_score = 0.0
+                else: prox_score = (self.closest_dist - crit_dist) / (safe_dist - crit_dist)
 
-            # 3. CALCULATE CONFIDENCE (Distance Based)
-            # Far (> 3.0m) = 1.0
-            # Close (< 1.0m) = 0.0 (STOP)
-            if closest_dist > 3.0:
-                self.confidence = 1.0
-            elif closest_dist < 1.0:
-                self.confidence = 0.0
+                stab_score = self.calculate_stability_score(closest_vel_mag)
+                
+                raw_confidence = prox_score * stab_score
+                if raw_confidence < 0.05: raw_confidence = 0.0
+
+                # Panic Stop
+                drop = self.last_raw_conf - raw_confidence
+                if drop > 0.5:
+                    self.smooth_conf = raw_confidence 
+                else:
+                    alpha = 0.3
+                    self.smooth_conf = (1.0 - alpha) * self.smooth_conf + (alpha * raw_confidence)
+
+                self.last_raw_conf = raw_confidence
+
+                if self.recovery_mode:
+                    self.recovery_value += 0.05
+                    if self.recovery_value >= 1.0:
+                        self.recovery_value = 1.0
+                        self.recovery_mode = False 
+                    self.smooth_conf = max(self.smooth_conf, self.recovery_value)
+
             else:
-                # Linear drop between 3.0 and 1.0
-                self.confidence = (closest_dist - 1.0) / 2.0
+                self.smooth_conf = 1.0 
 
-            # 4. DETERMINE STATE LABEL
-            if self.manual_override:
-                state_label = "MANUAL"
-            elif self.confidence == 0.0:
-                state_label = "UNSTABLE" # Acts as PAUSE
-            elif self.confidence < 0.8:
-                state_label = "AVOIDING"
-            else:
-                state_label = "PROCEED"
+            self.publish_status_to_ui(closest_name)
 
-            status_packet = {
-                "confidence": round(self.confidence, 2),
-                "state": state_label,
-                "object": closest_name,
-                "override": self.manual_override
-            }
-            self.pub_status.publish(String(data=json.dumps(status_packet)))
-
-        except Exception:
-            pass
+        except Exception as e:
+            self.get_logger().error(f"Perception Error: {e}")
 
     def control_callback(self, msg):
         final_cmd = Twist()
-        final_cmd.angular.z = msg.angular.z 
+        current_time = time.time()
         
-        if self.manual_override:
-            final_cmd.linear.x = msg.linear.x
-        else:
-            if msg.linear.x > 0:
-                final_cmd.linear.x = msg.linear.x * self.confidence
-            else:
-                final_cmd.linear.x = msg.linear.x 
+        if self.drive_state == STATE_CRUISE:
+            final_cmd.linear.x = msg.linear.x * 3.5 
+            if final_cmd.linear.x > 0.8: final_cmd.linear.x = 0.8 
+            final_cmd.angular.z = msg.angular.z
+            
+            # --- TUNED GATEKEEPER ---
+            # Trigger at 1.5m with lower confidence threshold (0.4)
+            if self.closest_dist < 2.0 and final_cmd.linear.x > 0:
+                if self.smooth_conf > 0.4:
+                    self.drive_state = STATE_SWERVE_OUT
+                    self.state_start_time = current_time
+                    self.get_logger().info(f"OBSTACLE ({self.closest_dist:.1f}m): SWERVING")
+                else:
+                    # Moving object (Conf=0.0) -> Pass -> Stop
+                    pass
+
+        elif self.drive_state == STATE_SWERVE_OUT:
+            final_cmd.linear.x = 0.5 
+            final_cmd.angular.z = 0.8 
+            if current_time - self.state_start_time > 0.8: 
+                self.drive_state = STATE_PASSING
+                self.state_start_time = current_time
+
+        elif self.drive_state == STATE_PASSING:
+            final_cmd.linear.x = 0.8 
+            final_cmd.angular.z = 0.0
+            if current_time - self.state_start_time > 1.5: 
+                self.drive_state = STATE_MERGE_BACK
+                self.state_start_time = current_time
+
+        elif self.drive_state == STATE_MERGE_BACK:
+            final_cmd.linear.x = 0.5
+            final_cmd.angular.z = -0.8
+            if current_time - self.state_start_time > 0.8:
+                self.drive_state = STATE_CRUISE 
+                self.get_logger().info("RESUMING CRUISE")
+
+        final_cmd.linear.x = final_cmd.linear.x * self.smooth_conf
+        final_cmd.angular.z = final_cmd.angular.z * self.smooth_conf
 
         self.pub_cmd.publish(final_cmd)
 
+    def publish_status_to_ui(self, obs_name):
+        current_val = self.smooth_conf
+        if self.drive_state != STATE_CRUISE: state_label = "AVOIDING"
+        elif current_val < 0.4: state_label = "DANGER STOP"
+        elif current_val < 0.7: state_label = "CAUTION"
+        else: state_label = "PROCEED"
+
+        status_packet = {
+            "confidence": round(current_val, 2),
+            "state": state_label,
+            "object": obs_name,
+            "override": self.recovery_mode
+        }
+        self.pub_status.publish(String(data=json.dumps(status_packet)))
+
 def main(args=None):
     rclpy.init(args=args)
-    node = LPLManagerSimple()
+    node = LPLManagerFormula()
     rclpy.spin(node)
     rclpy.shutdown()
 
