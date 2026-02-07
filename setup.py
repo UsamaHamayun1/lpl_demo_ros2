@@ -18,6 +18,8 @@ setup(
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
         # Include all world files
         (os.path.join('share', package_name, 'worlds'), glob('worlds/*.world')),
+        # URDF
+        (os.path.join('share', package_name, 'urdf'), glob('urdf/*.urdf')),
         # --- ADDED LINES END ---
     ],
     install_requires=['setuptools'],
@@ -33,6 +35,7 @@ setup(
             'lpl_manager_formula = lpl_demo.lpl_manager_formula:main',
             'human_authorize = lpl_demo.human_authorize:main',
             'lpl_dashboard = lpl_demo.lpl_dashboard:main',
+            'lpl_actordirector = lpl_demo.lpl_actordirector:main',
             ],
     },
 )   
