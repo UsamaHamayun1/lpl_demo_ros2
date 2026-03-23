@@ -4,7 +4,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Twist
-from std_msgs.msg import String, Empty
+from std_msgs.msg import String, Empty, Bool
 import cv2
 import json
 import numpy as np
@@ -33,14 +33,15 @@ class LPLDashboard(QWidget):
         # Publishers
         self.pub_auth = self.node.create_publisher(Empty, '/lpl/authorize', 10)
         self.pub_input = self.node.create_publisher(Twist, '/cmd_vel_input', 10)
-        
-        # NEW: Actor Control Publisher
-        self.pub_actor = self.node.create_publisher(String, '/actor/mode', 10)
+        self.pub_actor = self.node.create_publisher(String, '/lpl/actor_mode', 10)
+        self.pub_lpl_mode = self.node.create_publisher(Bool, '/lpl/activation', 10)
+        self.pub_blue = self.node.create_publisher(Twist, '/blue_cmd_vel', 10)
 
         # State Variables
         self.manual_mode = False
         self.target_lin = 0.0
         self.target_ang = 0.0
+        self.lpl_enabled = True # Default to ON
 
         # 2. UI SETUP
         self.init_ui()
@@ -56,11 +57,9 @@ class LPLDashboard(QWidget):
 
     def init_ui(self):
         self.setWindowTitle(WINDOW_TITLE)
-        # Increased height to 850 to fit new buttons
-        self.setGeometry(100, 100, 900, 850) 
+        self.setGeometry(100, 100, 900, 900) 
         self.setStyleSheet("background-color: #121212; color: #e0e0e0;")
 
-        # Main Layout
         layout = QVBoxLayout()
         layout.setSpacing(15)
         layout.setContentsMargins(30, 30, 30, 30)
@@ -83,11 +82,9 @@ class LPLDashboard(QWidget):
         # --- STATUS & TELEMETRY PANEL ---
         status_frame = QFrame()
         status_frame.setStyleSheet("background-color: #1e1e1e; border-radius: 10px; padding: 15px;")
-        
         grid_layout = QGridLayout(status_frame)
         grid_layout.setSpacing(10)
 
-        # -- Row 0: Main Headers --
         self.lbl_obj_title = QLabel("TARGET: --")
         self.lbl_obj_title.setFont(QFont("Courier New", 14, QFont.Bold))
         grid_layout.addWidget(self.lbl_obj_title, 0, 0)
@@ -103,7 +100,6 @@ class LPLDashboard(QWidget):
         self.lbl_conf_val.setFont(QFont("Courier New", 14, QFont.Bold))
         grid_layout.addWidget(self.lbl_conf_val, 0, 2)
 
-        # -- Row 1: Main Confidence Bar --
         self.bar_conf = QProgressBar()
         self.bar_conf.setRange(0, 100)
         self.bar_conf.setValue(100)
@@ -112,9 +108,7 @@ class LPLDashboard(QWidget):
         self.bar_conf.setStyleSheet("QProgressBar::chunk { background-color: #28a745; }")
         grid_layout.addWidget(self.bar_conf, 1, 0, 1, 3) 
 
-        # --- METRICS SECTION ---
-        
-        # -- Row 2: Proximity --
+        # Proximity
         lbl_prox = QLabel("PROXIMITY (Distance):")
         lbl_prox.setStyleSheet("color: #aaa; font-weight: bold;")
         grid_layout.addWidget(lbl_prox, 2, 0)
@@ -127,7 +121,7 @@ class LPLDashboard(QWidget):
         self.bar_prox.setStyleSheet("QProgressBar::chunk { background-color: #00ccff; }")
         grid_layout.addWidget(self.bar_prox, 2, 1, 1, 2) 
 
-        # -- Row 3: Stability --
+        # Stability
         lbl_stab = QLabel("STABILITY (Behavior):")
         lbl_stab.setStyleSheet("color: #aaa; font-weight: bold;")
         grid_layout.addWidget(lbl_stab, 3, 0)
@@ -140,7 +134,7 @@ class LPLDashboard(QWidget):
         self.bar_stab.setStyleSheet("QProgressBar::chunk { background-color: #ffcc00; }")
         grid_layout.addWidget(self.bar_stab, 3, 1, 1, 2) 
 
-        # -- Row 4: Velocity Telemetry --
+        # Velocity
         vel_label = QLabel("VELOCITY:")
         vel_label.setFont(QFont("Arial", 10, QFont.Bold))
         vel_label.setStyleSheet("color: #666; margin-top: 10px;")
@@ -158,12 +152,21 @@ class LPLDashboard(QWidget):
 
         layout.addWidget(status_frame)
 
-        # --- ROBOT CONTROLS ---
+        # --- LPL SYSTEM TOGGLE ---
+        sys_layout = QHBoxLayout()
+        self.btn_lpl_toggle = QPushButton("LPL SYSTEM: ON (Filtering Active)")
+        self.btn_lpl_toggle.setFixedHeight(50)
+        self.btn_lpl_toggle.setFont(QFont("Arial", 12, QFont.Bold))
+        self.btn_lpl_toggle.setStyleSheet("background-color: #28a745; color: white; border-radius: 5px;")
+        self.btn_lpl_toggle.clicked.connect(self.toggle_lpl)
+        sys_layout.addWidget(self.btn_lpl_toggle)
+        layout.addLayout(sys_layout)
+
+        # --- ROBOT & BLUE BOX CONTROLS ---
         btn_layout = QHBoxLayout()
-        
-        lbl_instruct = QLabel("CONTROLS:\nWASD to Drive\nSPACE to Override")
-        lbl_instruct.setFont(QFont("Arial", 10))
-        lbl_instruct.setStyleSheet("color: #666;")
+        lbl_instruct = QLabel("ROBOT: WASD to Drive, X to Reverse, SPACE to Take Control\nBLUE HAZARD: U=Fwd, N=Back, H=Left, J=Right, K=Stop")
+        lbl_instruct.setFont(QFont("Arial", 10, QFont.Bold))
+        lbl_instruct.setStyleSheet("color: #888;")
         btn_layout.addWidget(lbl_instruct)
         
         btn_layout.addStretch()
@@ -188,19 +191,16 @@ class LPLDashboard(QWidget):
         # --- SEPARATOR ---
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
-        line.setFrameShadow(QFrame.Sunken)
         line.setStyleSheet("background-color: #333;")
         layout.addWidget(line)
 
-        # --- NEW ACTOR CONTROLS (JITTER / STABLE) ---
+        # --- ACTOR CONTROLS ---
         actor_layout = QHBoxLayout()
-        
         lbl_actor = QLabel("SIMULATION\nCONTROL:")
         lbl_actor.setFont(QFont("Arial", 10, QFont.Bold))
         lbl_actor.setStyleSheet("color: #888;")
         actor_layout.addWidget(lbl_actor)
 
-        # STABLE BUTTON
         self.btn_stable = QPushButton("STABLE MODE (Normal)")
         self.btn_stable.setFixedSize(250, 50)
         self.btn_stable.setFont(QFont("Arial", 11, QFont.Bold))
@@ -208,7 +208,6 @@ class LPLDashboard(QWidget):
         self.btn_stable.clicked.connect(lambda: self.set_actor_mode("SMOOTH"))
         actor_layout.addWidget(self.btn_stable)
 
-        # JITTER BUTTON
         self.btn_jitter = QPushButton("JITTER MODE (High Variance)")
         self.btn_jitter.setFixedSize(250, 50)
         self.btn_jitter.setFont(QFont("Arial", 11, QFont.Bold))
@@ -216,23 +215,39 @@ class LPLDashboard(QWidget):
         self.btn_jitter.clicked.connect(lambda: self.set_actor_mode("JITTER"))
         actor_layout.addWidget(self.btn_jitter)
         
-        actor_layout.addStretch()
         layout.addLayout(actor_layout)
-
         self.setLayout(layout)
         self.setFocusPolicy(Qt.StrongFocus)
 
     # --- LOGIC ---
 
+    def toggle_lpl(self):
+        self.lpl_enabled = not self.lpl_enabled
+        msg = Bool()
+        msg.data = self.lpl_enabled
+        self.pub_lpl_mode.publish(msg)
+        
+        if self.lpl_enabled:
+            self.btn_lpl_toggle.setText("LPL SYSTEM: ON (Filtering Active)")
+            self.btn_lpl_toggle.setStyleSheet("background-color: #28a745; color: white; border-radius: 5px;")
+        else:
+            self.btn_lpl_toggle.setText("LPL SYSTEM: OFF (Raw Nav2 Active)")
+            self.btn_lpl_toggle.setStyleSheet("background-color: #d32f2f; color: white; border-radius: 5px;")
+
     def spin_ros(self):
         rclpy.spin_once(self.node, timeout_sec=0)
+
+    def set_blue_speed(self, x, y):
+        msg = Twist()
+        msg.linear.x = float(x)
+        msg.linear.y = float(y) # Planar move uses Y for side-to-side
+        self.pub_blue.publish(msg)
 
     def publish_drive(self):
         msg = Twist()
         msg.linear.x = float(self.target_lin)
         msg.angular.z = float(self.target_ang)
         self.pub_input.publish(msg)
-        
         self.lbl_vel_lin.setText(f"LIN: {self.target_lin:.2f} m/s")
         self.lbl_vel_ang.setText(f"ANG: {self.target_ang:.2f} rad/s")
 
@@ -244,102 +259,164 @@ class LPLDashboard(QWidget):
         self.target_lin = x
         self.target_ang = z
     
-    # NEW: Function to control the Actor
     def set_actor_mode(self, mode):
         msg = String()
         msg.data = mode
         self.pub_actor.publish(msg)
-        print(f"Set Actor Mode: {mode}") # For debugging in terminal
 
     # --- EVENTS ---
     def keyPressEvent(self, event: QKeyEvent):
         key = event.key()
-        # WASD Controls
+        # Robot Controls
         if key == Qt.Key_W: self.set_speed(0.3, 0.0)
         elif key == Qt.Key_S: self.set_speed(0.0, 0.0) 
         elif key == Qt.Key_A: self.set_speed(0.0, 0.5) 
         elif key == Qt.Key_D: self.set_speed(0.0, -0.5)
         elif key == Qt.Key_X: self.set_speed(-0.2, 0.0)
-        # Auth Control
         elif key == Qt.Key_Space: self.send_auth()
-        # Keyboard Shortcuts for Actor
-        elif key == Qt.Key_J: self.set_actor_mode("JITTER")
-        elif key == Qt.Key_L: self.set_actor_mode("SMOOTH")
+
+        # Blue Box Controls
+        elif key == Qt.Key_U: self.set_blue_speed(1.0, 0.0)  # Forward
+        elif key == Qt.Key_N: self.set_blue_speed(-1.0, 0.0) # Backward
+        elif key == Qt.Key_H: self.set_blue_speed(0.0, 1.0)  # Left
+        elif key == Qt.Key_J: self.set_blue_speed(0.0, -1.0) # Right
+        elif key == Qt.Key_K: self.set_blue_speed(0.0, 0.0)  # Stop
 
     # --- CALLBACKS ---
+    # def status_callback(self, msg):
+    #     try:
+    #         data = json.loads(msg.data)
+    #         conf = float(data.get('confidence', 0.0))
+    #         state = data.get('state', "UNKNOWN")
+    #         obj = data.get('object', "--")
+    #         self.manual_mode = data.get('override', False)
+            
+    #         prox = float(data.get('prox', 1.0)) 
+    #         stab = float(data.get('stab', 1.0))
+
+    #         self.lbl_obj_title.setText(f"TARGET: {obj.upper()}")
+    #         self.lbl_state.setText(state)
+    #         self.lbl_conf_val.setText(f"CONF: {conf:.2f}")
+    #         self.bar_conf.setValue(int(conf * 100))
+            
+    #         self.bar_prox.setValue(int(prox * 100))
+    #         self.bar_stab.setValue(int(stab * 100))
+
+    #         # --- Proximity & Stability Mini-Bar Coloring ---
+    #         if prox < 0.3: self.bar_prox.setStyleSheet("QProgressBar::chunk { background-color: #ff3333; }")
+    #         elif prox < 0.6: self.bar_prox.setStyleSheet("QProgressBar::chunk { background-color: #ffcc00; }")
+    #         else: self.bar_prox.setStyleSheet("QProgressBar::chunk { background-color: #00ccff; }")
+            
+    #         if stab < 0.3: self.bar_stab.setStyleSheet("QProgressBar::chunk { background-color: #ff3333; }")
+    #         elif stab < 0.6: self.bar_stab.setStyleSheet("QProgressBar::chunk { background-color: #ffcc00; }")
+    #         else: self.bar_stab.setStyleSheet("QProgressBar::chunk { background-color: #aa00ff; }")
+
+    #         # --- LPL COLOR STATE MAPPING (Backgrounds/Labels Only) ---
+    #         if state == "CONFIDENT" or state == "LPL DISABLED":
+    #             c = "#28a745" # GREEN
+    #             self.lbl_state.setStyleSheet(f"color: {c}; font-weight: bold;")
+    #             self.bar_conf.setStyleSheet(f"QProgressBar::chunk {{ background-color: {c}; }}")
+
+    #         elif state == "CAUTIOUS":
+    #             c = "#ffc107" # YELLOW
+    #             self.lbl_state.setStyleSheet(f"color: {c}; font-weight: bold;")
+    #             self.bar_conf.setStyleSheet(f"QProgressBar::chunk {{ background-color: {c}; }}")
+
+    #         elif state == "PAUSED" or state == "DANGER STOP":
+    #             c = "#dc3545" # RED
+    #             self.lbl_state.setStyleSheet(f"color: {c}; font-weight: bold;")
+    #             self.bar_conf.setStyleSheet(f"QProgressBar::chunk {{ background-color: {c}; }}")
+
+    #         elif state == "MANUAL OVERRIDE":
+    #             c = "#007bff" # BLUE
+    #             self.lbl_state.setStyleSheet(f"color: {c}; font-weight: bold;")
+    #             self.bar_conf.setStyleSheet(f"QProgressBar::chunk {{ background-color: {c}; }}")
+
+    #         # --- BUTTON OVERRIDE LOGIC ---
+    #         # If the human has authority, the button is ALWAYS Blue and active
+    #         if self.manual_mode: 
+    #             self.btn_auth.setStyleSheet("background-color: #007bff; color: white; font-weight: bold; border-radius: 5px;")
+    #             self.btn_auth.setText("AUTHORIZE AI RESUME\n[SPACE]")
+    #             self.btn_auth.setEnabled(True)
+    #         else:
+    #             # If AI has authority, button is gray and inactive
+    #             self.btn_auth.setStyleSheet("background-color: #444; color: #888; border-radius: 5px;")
+    #             self.btn_auth.setEnabled(False)
+    #             if state == "LPL DISABLED": self.btn_auth.setText("OFFLINE")
+    #             elif state == "CONFIDENT": self.btn_auth.setText("ALL CLEAR")
+    #             elif state == "CAUTIOUS": self.btn_auth.setText("CAUTION")
+    #             elif state == "PAUSED" or state == "DANGER STOP": self.btn_auth.setText("PAUSED")
+    #             elif state == "MANUAL OVERRIDE": self.btn_auth.setText("AUTHORIZING...")
+
+    #     except Exception:
+    #         pass
     def status_callback(self, msg):
         try:
             data = json.loads(msg.data)
-            
-            # 1. Main Stats
             conf = float(data.get('confidence', 0.0))
             state = data.get('state', "UNKNOWN")
             obj = data.get('object', "--")
             self.manual_mode = data.get('override', False)
             
-            # 2. Detailed Metrics (Prox & Stab)
-            # Default to 1.0 (Safe) if missing
             prox = float(data.get('prox', 1.0)) 
             stab = float(data.get('stab', 1.0))
 
-            # UPDATE UI LABELS
             self.lbl_obj_title.setText(f"TARGET: {obj.upper()}")
             self.lbl_state.setText(state)
             self.lbl_conf_val.setText(f"CONF: {conf:.2f}")
             self.bar_conf.setValue(int(conf * 100))
             
-            # UPDATE METRIC BARS
             self.bar_prox.setValue(int(prox * 100))
             self.bar_stab.setValue(int(stab * 100))
 
-            # --- DYNAMIC COLORING ---
+            # --- Proximity & Stability Mini-Bar Coloring ---
+            if prox < 0.3: self.bar_prox.setStyleSheet("QProgressBar::chunk { background-color: #ff3333; }")
+            elif prox < 0.6: self.bar_prox.setStyleSheet("QProgressBar::chunk { background-color: #ffcc00; }")
+            else: self.bar_prox.setStyleSheet("QProgressBar::chunk { background-color: #00ccff; }")
             
-            # Proximity Colors (Cyan -> Red)
-            if prox < 0.3: self.bar_prox.setStyleSheet("QProgressBar::chunk { background-color: #ff3333; }") # Red
-            elif prox < 0.6: self.bar_prox.setStyleSheet("QProgressBar::chunk { background-color: #ffcc00; }") # Yellow
-            else: self.bar_prox.setStyleSheet("QProgressBar::chunk { background-color: #00ccff; }") # Cyan
+            if stab < 0.3: self.bar_stab.setStyleSheet("QProgressBar::chunk { background-color: #ff3333; }")
+            elif stab < 0.6: self.bar_stab.setStyleSheet("QProgressBar::chunk { background-color: #ffcc00; }")
+            else: self.bar_stab.setStyleSheet("QProgressBar::chunk { background-color: #aa00ff; }")
+
+            # --- PROGRESS BAR SLIDING COLOR LOGIC ---
+            # This ensures the bar visually slides through the colors as the numeric value drops!
+            if self.manual_mode and conf <= 0.05:
+                bar_color = "#007bff" # BLUE (Only turns blue when fully drained and human is ready)
+            elif conf <= 0.20:
+                bar_color = "#dc3545" # RED (Draining to empty)
+            elif conf < 0.90:
+                bar_color = "#ffc107" # YELLOW (Passing through middle)
+            else:
+                bar_color = "#28a745" # GREEN (Confident)
             
-            # Stability Colors (Purple -> Red)
-            if stab < 0.3: self.bar_stab.setStyleSheet("QProgressBar::chunk { background-color: #ff3333; }") # Red
-            elif stab < 0.6: self.bar_stab.setStyleSheet("QProgressBar::chunk { background-color: #ffcc00; }") # Yellow
-            else: self.bar_stab.setStyleSheet("QProgressBar::chunk { background-color: #aa00ff; }") # Purple
+            self.bar_conf.setStyleSheet(f"QProgressBar::chunk {{ background-color: {bar_color}; }}")
 
-            # Main State Coloring
-            if self.manual_mode:
-                c = "#00ccff" 
-                self.lbl_state.setStyleSheet(f"color: {c}; font-weight: bold;")
-                self.bar_conf.setStyleSheet(f"QProgressBar::chunk {{ background-color: {c}; }}")
-                self.btn_auth.setStyleSheet(f"background-color: {c}; color: black; border-radius: 5px;")
-                self.btn_auth.setText("RESUME AUTO\n[SPACE]")
+            # --- TEXT & BUTTON STATE MAPPING ---
+            if state == "CONFIDENT" or state == "LPL DISABLED":
+                self.lbl_state.setStyleSheet("color: #28a745; font-weight: bold;")
+            elif state == "CAUTIOUS":
+                self.lbl_state.setStyleSheet("color: #ffc107; font-weight: bold;")
+            elif state == "PAUSED" or state == "DANGER STOP":
+                self.lbl_state.setStyleSheet("color: #dc3545; font-weight: bold;")
+            elif state == "MANUAL OVERRIDE":
+                self.lbl_state.setStyleSheet("color: #007bff; font-weight: bold;")
+
+            # --- BUTTON OVERRIDE LOGIC ---
+            if self.manual_mode: 
+                self.btn_auth.setStyleSheet("background-color: #007bff; color: white; font-weight: bold; border-radius: 5px;")
+                self.btn_auth.setText("AUTHORIZE RESUME\n[SPACE]")
                 self.btn_auth.setEnabled(True)
-
-            elif state == "DANGER STOP" or state == "UNSTABLE":
-                c = "#ff3333" 
-                self.lbl_state.setStyleSheet(f"color: {c}; font-weight: bold;")
-                self.bar_conf.setStyleSheet(f"QProgressBar::chunk {{ background-color: {c}; }}")
-                self.btn_auth.setStyleSheet("background-color: white; color: black; border-radius: 5px;")
-                self.btn_auth.setText("TAKE CONTROL\n[SPACE]")
-                self.btn_auth.setEnabled(True)
-
-            elif state == "PROCEED":
-                c = "#28a745" 
-                self.lbl_state.setStyleSheet(f"color: {c}; font-weight: bold;")
-                self.bar_conf.setStyleSheet(f"QProgressBar::chunk {{ background-color: {c}; }}")
+            else:
                 self.btn_auth.setStyleSheet("background-color: #444; color: #888; border-radius: 5px;")
-                self.btn_auth.setText("AUTO ENGAGED")
                 self.btn_auth.setEnabled(False)
-
-            else: 
-                c = "#ffc107" # Caution
-                self.lbl_state.setStyleSheet(f"color: {c}; font-weight: bold;")
-                self.bar_conf.setStyleSheet(f"QProgressBar::chunk {{ background-color: {c}; }}")
-                self.btn_auth.setStyleSheet("background-color: #444; color: #888; border-radius: 5px;")
-                self.btn_auth.setText("CAUTION")
-                self.btn_auth.setEnabled(False)
+                if state == "LPL DISABLED": self.btn_auth.setText("OFFLINE")
+                elif state == "CONFIDENT": self.btn_auth.setText("ALL CLEAR")
+                elif state == "CAUTIOUS": self.btn_auth.setText("CAUTION")
+                elif state == "PAUSED" or state == "DANGER STOP": self.btn_auth.setText("PAUSED")
+                elif state == "MANUAL OVERRIDE": self.btn_auth.setText("AUTHORIZING...")
 
         except Exception:
             pass
-
     def image_callback(self, msg):
         try:
             np_arr = np.frombuffer(msg.data, dtype=np.uint8)
@@ -361,7 +438,7 @@ class LPLDashboard(QWidget):
 def main():
     app = QApplication(sys.argv)
     window = LPLDashboard()
-    window.show()
+    window.show()   
     sys.exit(app.exec_())
 
 if __name__ == '__main__':

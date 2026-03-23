@@ -1,0 +1,56 @@
+<?xml version="1.0" ?>
+<robot name="actor_robot">
+
+  <link name="base_footprint">
+    <visual>
+      <geometry><box size="0.01 0.01 0.01"/></geometry>
+    </visual>
+  </link>
+
+  <joint name="base_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+  </joint>
+
+  <link name="base_link">
+    <inertial>
+      <mass value="20.0" />
+      <inertia ixx="1.0" ixy="0.0" ixz="0.0" iyy="1.0" iyz="0.0" izz="1.0" />
+    </inertial>
+
+    <visual>
+      <origin xyz="0 0 1.0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.5 0.5 1.8"/> 
+      </geometry>
+      <material name="Red">
+        <color rgba="1 0 0 1"/>
+      </material>
+    </visual>
+
+    <collision>
+      <origin xyz="0 0 1.0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.5 0.5 1.8"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <gazebo>
+    <plugin name="actor_planar_move" filename="libgazebo_ros_planar_move.so">
+      <ros>
+        <namespace>/actor</namespace>
+        <remapping>cmd_vel:=cmd_vel</remapping>
+        <remapping>odom:=odom</remapping>
+      </ros>
+      <update_rate>50</update_rate>
+      <publish_rate>20</publish_rate>
+      <robot_base_frame>base_footprint</robot_base_frame>
+    </plugin>
+    
+    <plugin name="gazebo_material" filename="libgazebo_ros_p3d.so">
+       <bodyName>base_link</bodyName>
+    </plugin>
+    <material>Gazebo/Red</material>
+  </gazebo>
+</robot>

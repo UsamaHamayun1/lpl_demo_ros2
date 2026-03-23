@@ -1,0 +1,61 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <world name="l_maze">
+    <include><uri>model://sun</uri></include>
+    <plugin name="gazebo_ros_state" filename="libgazebo_ros_state.so">
+      <ros><namespace>/gazebo</namespace></ros>
+      <update_rate>50.0</update_rate>
+    </plugin>
+
+    <model name="floor">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision"><geometry><plane><normal>0 0 1</normal><size>30 30</size></plane></geometry></collision>
+        <visual name="visual"><geometry><plane><normal>0 0 1</normal><size>30 30</size></plane></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+      </link>
+    </model>
+
+    <model name="wall_south"><pose>4.0 -2.0 1.0 0 0 0</pose><static>true</static><link name="link"><collision name="collision"><geometry><box><size>12.0 0.2 2.0</size></box></geometry></collision><visual name="visual"><geometry><box><size>12.0 0.2 2.0</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Bricks</name></script></material></visual></link></model>
+    
+    <model name="wall_north"><pose>3.0 2.0 1.0 0 0 0</pose><static>true</static><link name="link"><collision name="collision"><geometry><box><size>10.0 0.2 2.0</size></box></geometry></collision><visual name="visual"><geometry><box><size>10.0 0.2 2.0</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Bricks</name></script></material></visual></link></model>
+    
+    <model name="wall_east"><pose>10.0 4.0 1.0 0 0 1.5707</pose><static>true</static><link name="link"><collision name="collision"><geometry><box><size>12.0 0.2 2.0</size></box></geometry></collision><visual name="visual"><geometry><box><size>12.0 0.2 2.0</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Bricks</name></script></material></visual></link></model>
+    
+    <model name="wall_west"><pose>8.0 7.0 1.0 0 0 1.5707</pose><static>true</static><link name="link"><collision name="collision"><geometry><box><size>10.0 0.2 2.0</size></box></geometry></collision><visual name="visual"><geometry><box><size>10.0 0.2 2.0</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Bricks</name></script></material></visual></link></model>
+
+    <model name='obstacle_safe_1'>
+      <pose>3.0 -1.0 0.4 0 0 0</pose>
+      <static>1</static>
+      <link name='link'>
+        <collision name='collision'><geometry><box><size>0.6 0.8 0.8</size></box></geometry></collision>
+        <visual name='visual'><geometry><box><size>0.6 0.8 0.8</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Yellow</name></script></material></visual>
+      </link>
+    </model>
+
+    <model name='obstacle_safe_2'>
+      <pose>9.0 6.0 0.4 0 0 0</pose>
+      <static>1</static>
+      <link name='link'>
+        <collision name='collision'><geometry><box><size>0.6 0.8 0.8</size></box></geometry></collision>
+        <visual name='visual'><geometry><box><size>0.6 0.8 0.8</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script></material></visual>
+      </link>
+    </model>
+
+    <model name='obstacle_danger'>
+      <pose>6.5 0.0 0.3 0 0 0</pose>
+      <static>0</static>
+      <link name='link'>
+        <inertial><mass>1.0</mass><inertia><ixx>0.1</ixx><ixy>0</ixy><ixz>0</ixz><iyy>0.1</iyy><iyz>0</iyz><izz>0.1</izz></inertia></inertial>
+        <collision name='collision'><geometry><box><size>0.6 0.6 0.6</size></box></geometry></collision>
+        <visual name='visual'><geometry><box><size>0.6 0.6 0.6</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/RedBright</name></script></material></visual>
+      </link>
+      <plugin name="gazebo_ros_planar_move" filename="libgazebo_ros_planar_move.so">
+        <ros><namespace>/</namespace><remapping>cmd_vel:=actor_cmd_vel</remapping><remapping>odom:=actor_odom</remapping></ros>
+        <update_rate>50.0</update_rate><publish_rate>20.0</publish_rate>
+        <publish_odom>true</publish_odom><publish_odom_tf>false</publish_odom_tf>
+        <odometry_frame>odom</odometry_frame><robot_base_frame>link</robot_base_frame>
+      </plugin>
+    </model>
+
+  </world>
+</sdf>

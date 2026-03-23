@@ -36,6 +36,10 @@ setup(
             'human_authorize = lpl_demo.human_authorize:main',
             'lpl_dashboard = lpl_demo.lpl_dashboard:main',
             'lpl_actordirector = lpl_demo.lpl_actordirector:main',
+            'lpl_manager_gauntlet = lpl_demo.lpl_manager_gauntlet:main',
+            'lpl_manager_guard = lpl_demo.lpl_manager_guard:main',
+            'lpl_nav2_demo = lpl_demo.lpl_nav2_demo:main',
+            
             ],
     },
 )   
